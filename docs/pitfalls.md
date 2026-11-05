@@ -45,7 +45,13 @@ const body = { ...y, hint, net_state, queue_type, sign,
 前者来自 `combo-web` bundle 的静态配置表（`getStaticConfig("app_key")`，
 按 `area/env/game_key` 匹配），**不是** web bundle 的 `appEnv.appKey`。
 
-用错的 key 得到 `ca8d397313906b4b777e2cfafe7967feaf794c563c961ea23dc9f130ac00e182`。
+拿同一个输入对比两个 key 就能一眼分辨（`node src/sign.js` 的自检也是这么写的）。
+以 fixture `app_id=4&channel_id=1&combo_token=v2_0123...&open_id=100000001` 为例：
+
+| key | 输出 |
+|---|---|
+| `d0d3a734...`（正确） | `c3cfb041cd387fde2a35c075b8689d6cb8c0f33ef01cf11d95767ae7afc585c0` |
+| `7511caf0...`（错用 paasDispatch 的 key） | `e8ce9d35499de2478737b10953cd8ad8527d0517d1eb3b105dd3701e90a3a7f3` |
 
 ---
 

@@ -46,8 +46,13 @@ node src/pbdecode.js '<base64 sdk_param>'   # 解码任意 sdk_param
 [verify_sign] computed: 198f2d8d452dfce709cb4c5f63f61fbb487061d286ca0970eef888a2ab2cedfe
 [verify_sign] expected: 198f2d8d452dfce709cb4c5f63f61fbb487061d286ca0970eef888a2ab2cedfe
 [verify_sign] MATCH   : true
-[verify_sign] combo_token MATCH: true
+[verify_sign] combo si : c3cfb041cd387fde2a35c075b8689d6cb8c0f33ef01cf11d95767ae7afc585c0
+[verify_sign] combo MATCH: true
 ```
+
+第一条用的是**真实抓包**的 `paasDispatch` 请求体（不含账号凭据）。
+第二条改用占位 fixture（`open_id=100000001`），期望值由 `openssl dgst -sha256 -hmac`
+独立算出 —— 真实 `combo_token` 属于账号凭据，未纳入仓库。
 
 ```
 packets = 5
@@ -168,7 +173,7 @@ const body = { ...y, hint, net_state, queue_type, sign,
 | `paasDispatch` 的 `sign` | `7511caf05a67bb7ca33b1970ce6222a8` | `web.*.js` 模块 21820 `appEnv.appKey` |
 
 签名原文（前者）：`app_id=4&channel_id=1&combo_token=..&open_id=..`
-用错 key 会得到 `ca8d397313906b4b777e2cfafe7967feaf794c563c961ea23dc9f130ac00e182`。
+用错 key 会得到 `e8ce9d35499de2478737b10953cd8ad8527d0517d1eb3b105dd3701e90a3a7f3`。
 
 ### 4. `cmd_line` 在新流程里是空字符串
 
