@@ -13,16 +13,22 @@
 
 ## 这个仓库解决什么问题
 
-想自己封装一个云原神客户端，要打通三段**完全不同**的协议：
+想自己封装一个云原神客户端，要打通四段**完全不同**的协议：
 
 | 阶段 | 协议 | 关键产物 |
 |---|---|---|
-| ① 登录取票 | 米哈游 combo / passport HTTP | `combo_token` + `open_id` → `x-rpc-combo_token` |
-| ② 申请实例 | cloudgame HTTP 调度（含 HMAC 签名） | `sdk_param`（protobuf） |
-| ③ 进入游玩窗口 | WebSocket 信令 + WebRTC + 自定义二进制帧 | 视频流 + 触摸输入通道 |
+| ① 账号登录 | passport HTTP（请求体 RSA 加密） | 一组 token cookie |
+| ② 登录取票 | 米哈游 combo / passport HTTP | `combo_token` + `open_id` → `x-rpc-combo_token` |
+| ③ 申请实例 | cloudgame HTTP 调度（含 HMAC 签名） | `sdk_param`（protobuf） |
+| ④ 进入游玩窗口 | WebSocket 信令 + WebRTC + 自定义二进制帧 | 视频流 + 触摸输入通道 |
 
-第 ③ 段是绝大多数人卡住的地方 —— **它不是 HTTP 接口**，没有 URL 可抓。
-本仓库把三段的字段、时序、算法、坑全部写清楚，并给出可运行的参考实现。
+第 ① 段（账号密码 / 手机验证码 / 扫码登录）单列在 [`docs/account.md`](docs/account.md)：
+它走 `passport-api.mihoyo.com`，请求体里的账号、密码、手机号要先
+**RSA-1024 / PKCS#1 v1.5** 加密成 base64 再发。如果你手上已有一份登录好的 cookie，
+可以跳过第 ① 段直接从 ② 开始。
+
+第 ④ 段是绝大多数人卡住的地方 —— **它不是 HTTP 接口**，没有 URL 可抓。
+本仓库把四段的字段、时序、算法、坑全部写清楚，并给出可运行的参考实现。
 
 ---
 
@@ -32,9 +38,10 @@
 git clone https://github.com/56dz/yunyuanshen-api
 cd yunyuanshen-api
 
-npm test                 # 等价于下面两条
+npm test                 # 等价于下面三条
 node src/sign.js         # 验证 paasDispatch sign + combo_token 组装 → 两行 MATCH: true
 node src/test-touch.js   # 验证触摸编码 + 手指池 → ALL CHECKS PASSED
+node src/test-crypto.js  # 验证 passport 登录用的 RSA 加密 → ALL CHECKS PASSED
 node src/pbdecode.js '<base64 sdk_param>'   # 解码任意 sdk_param
 ```
 
@@ -67,10 +74,20 @@ ALL CHECKS PASSED
 
 ---
 
-## 三段链路总览
+## 四段链路总览
 
 ```
-┌─ ① 登录 ─────────────────────────────────────────────────────────────┐
+┌─ ① 账号登录（passport 域，详见 docs/account.md）─────────────────────┐
+│ POST passport-api.mihoyo.com/account/ma-cn-passport/web/loginByPassword
+│      body {"account": RSA(账号), "password": RSA(密码)}
+│ POST .../web/loginByMobileCaptcha   加密 {mobile, area_code} + captcha
+│ POST .../web/createQRLogin → {url, ticket}，再轮询 queryQRLoginStatus
+│      └ status: Created → Scanned → Confirmed
+│ 密码/手机号/区号/身份证号/姓名 都要 RSA-1024 PKCS#1 v1.5 → base64
+│ 成功 → 服务端 Set-Cookie 下发 token cookie（前端不写 cookie）
+└───────────────────────────────────────────────────────────────────────┘
+
+┌─ ② 登录取票 ─────────────────────────────────────────────────────────┐
 │ POST passport-api.mihoyo.com/account/ma-cn-session/web/webVerifyForGame
 │      └ 校验通行证 cookie，返回 user_info（明文 aid/email/mobile）+ set-cookie
 │ POST hk4e-sdk.mihoyo.com/hk4e_cn/combo/granter/login/webLogin
@@ -81,7 +98,7 @@ ALL CHECKS PASSED
 │ POST api-cloudgame.mihoyo.com/hk4e_cg_cn/gamer/api/login   ← 建云游戏 session
 └───────────────────────────────────────────────────────────────────────┘
 
-┌─ ② 调度 ─────────────────────────────────────────────────────────────┐
+┌─ ③ 调度 ─────────────────────────────────────────────────────────────┐
 │ GET  /wallet/wallet/get                          剩余时长 / 原点
 │ GET  /gamer/api/getSpeedLimitConfig?speed_client_type=8
 │        └ bit_rate = 1024 * gears[default_gear].top
@@ -94,7 +111,7 @@ ALL CHECKS PASSED
 │ 解 sdk_param → game_token / game_svr_addr / rtc_udp_port / game_server_wss_url
 └───────────────────────────────────────────────────────────────────────┘
 
-┌─ ③ 游玩窗口 ─────────────────────────────────────────────────────────┐
+┌─ ④ 游玩窗口 ─────────────────────────────────────────────────────────┐
 │ WSS  wss://<game_server_wss_url>/rtc-sdk        ← 注意要补 /rtc-sdk
 │      首帧 type=3 → {"client_type":"web","type":"client hello"}
 │      服务端发 offer → setRemoteDescription → createAnswer → 回 type=1
@@ -113,6 +130,7 @@ ALL CHECKS PASSED
 
 ```
 docs/
+  account.md      账号登录（密码 / 短信 / 扫码）、RSA 加密、passport 端点与错误码
   api.md          逐接口参考：请求/响应/请求头/字段含义/错误码
   protocol.md     调度链时序、签名算法（含"签名对象≠body"）、sdk_param 字段表
   webrtc.md       信令帧格式、SDP 协商（服务端发 offer）、ICE 地址改写、DataChannel
@@ -122,14 +140,17 @@ docs/
 
 src/
   sign.js         sign() / buildComboToken() / buildPaasDispatch()  ← npm test 自检
+  crypto.js       RSA-1024 PKCS#1 v1.5 加密（passport 登录用，Node/浏览器通用）
   touch.js        protobuf Writer、Packet 封帧、TouchController、SignalingChannel
   pbdecode.js     通用 protobuf wire 解码器（可 CLI 或 require）
   test-touch.js   多指模拟测试：fingerId 分配 / primary / 坐标 / 池归还
+  test-crypto.js  RSA 加密自检：与 node:crypto 互通 + 真实公钥参数比对
 
 examples/
-  login.js             ① 登录 → combo_token（Node，需环境变量 MHY_COOKIE）
-  dispatch.js          ② 调度 → sdk_param → 解出连接参数（Node）
-  play-skeleton.html   ③ 完整骨架：登录 + 调度 + WebRTC + 触摸（浏览器，零构建）
+  login-account.js     ① 账号登录：密码 / 短信 / 扫码三模式（Node）
+  login.js             ② 登录 → combo_token（Node，需环境变量 MHY_COOKIE）
+  dispatch.js          ③ 调度 → sdk_param → 解出连接参数（Node）
+  play-skeleton.html   ④ 完整骨架：登录 + 调度 + WebRTC + 触摸（浏览器，零构建）
 ```
 
 ---
@@ -261,11 +282,26 @@ y = ((layoutHeight - clientX) - rect.y) / rect.height
 ### Node：只验证算法
 
 ```bash
-npm test                            # sign + touch，两条断言
+npm test                            # sign + touch + crypto，三条断言
 node src/pbdecode.js '<base64>'     # 解 sdk_param
 ```
 
-### Node：真实跑通 ①②
+### Node：跑账号登录（第 ① 段）
+
+```bash
+# 扫码登录（默认，最安全：不在本地留密码）
+node examples/login-account.js qr
+
+# 账号密码登录（需要 RSA 加密，示例已内置）
+MHY_ACCOUNT='you@example.com' MHY_PASSWORD='...' node examples/login-account.js password
+
+# 手机验证码登录（会真的发短信，别对别人的号调）
+MHY_MOBILE='138xxxxxxxx' node examples/login-account.js captcha
+```
+
+成功后会打印服务端下发的 `Set-Cookie` 列表 —— 这就是下一段要用的 cookie。
+
+### Node：真实跑通 ②③
 
 ```bash
 # 需要一份已登录 ys.mihoyo.com 的浏览器 cookie
@@ -282,11 +318,13 @@ session 会自然超时回收（避免白白消耗时长）。
 
 打开 `examples/play-skeleton.html`（需 http 服务，`file://` 下 ES module 受限）。
 
-三个按钮对应三步，日志在左上角。注意：
+四个按钮：`1 登录` → `2 调度` → `3 连接` → `4 退出`（依序点），日志在左上角。注意：
 
 - 登录用 `credentials: 'include'`，**依赖 ys.mihoyo.com 同源 cookie**。
   跨域需要自己的后端代理，或临时用
   `chrome --disable-web-security --user-data-dir=<临时目录>` 并先登录一次米游社。
+- 这个骨架从第 ② 段（`webVerifyForGame`）开始；账号登录请用
+  `examples/login-account.js`，或干脆在浏览器里手动登录一次。
 - 点"3 连接"会真实建立游戏会话并**开始扣时长**，用完立刻点"退出"。
 
 ---
@@ -301,6 +339,11 @@ session 会自然超时回收（避免白白消耗时长）。
 - WebRTC 实际建流成功（PC 1920×1080、触摸 2118×978），音视频 track 均 live
 - 触摸版真实进入游戏画面并截图
 - `bit_rate = 1024 * top`、`regions` 顺序取自服务端、`releaseAllTouch` 广播 10 个 Up
+- passport 登录的 RSA 加密：**加密后的不存在账号返回 `-3208 账号或密码错误`，
+  未加密的同账号返回 `-3001 参数不合法`** —— 证明服务端能正确解出我们的密文
+- passport 必填请求头（消融实验）：`x-rpc-app_id` 缺失 → `-3005`；
+  `x-rpc-client_type/device_id/mi_referrer/lifecycle_id` 缺失 → `-3006 风控`
+- 扫码登录全流程：`createQRLogin` → `{"status":"Created"}` 轮询响应
 
 **未验证 / 已知缺口**：
 
@@ -310,7 +353,9 @@ session 会自然超时回收（避免白白消耗时长）。
 - `cgReport` 上报 body：进入游戏后未触发
 - wrapped HEVC（`HevcPipeline` 走 WebCodecs + canvas）：只在特定硬件启用，未实测
 - Mac / Keyboard 两种 client_type（17/23、19/25）：仅静态确认
-- 账号密码登录：本项目只做 cookie 之后的链路，passport 登录流程不在范围内
+- 账号登录**成功**的响应体与最终 cookie 名：本仓库未用真实账号跑通（会触发短信/风控），
+  token 由服务端 `Set-Cookie` 下发，前端 bundle 里没有任何写 cookie 的代码
+- 极验 `-3101` 的完整重放：只从响应拦截器源码还原了流程，未触发实测
 
 ---
 

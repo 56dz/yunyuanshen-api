@@ -8,10 +8,12 @@
     "node": ">=18"
   },
   "scripts": {
-    "test": "node src/sign.js && node src/test-touch.js",
+    "test": "node src/sign.js && node src/test-touch.js && node src/test-crypto.js",
     "sign": "node src/sign.js",
     "touch": "node src/test-touch.js",
+    "crypto": "node src/test-crypto.js",
     "login": "node examples/login.js",
+    "login-account": "node examples/login-account.js",
     "dispatch": "node examples/dispatch.js"
   },
   "keywords": [

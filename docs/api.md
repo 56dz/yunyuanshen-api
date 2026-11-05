@@ -3,6 +3,10 @@
 基线：`hk4e_cn` / 前端 `7.2.0` / `cg-sdk 6.1.0.65`（2026-10）。
 所有 `retcode == 0` 表示成功，`message` 通常为 `"OK"`。
 
+> 本文覆盖**登录取票之后**的接口（从 `passport-api` 的 `webVerifyForGame` 起）。
+> **账号登录**（账号密码 / 手机验证码 / 扫码）走另一套 `passport-api` 端点，
+> 请求体需要 RSA 加密，见 [account.md](account.md)。
+
 通用约定：
 
 - `api-cloudgame.mihoyo.com/hk4e_cg_cn` 下的接口**全部需要** `x-rpc-combo_token`（见下）。
