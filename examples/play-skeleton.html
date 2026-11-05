@@ -438,13 +438,8 @@ $('btn-connect').onclick = async () => {
 };
 $('btn-quit').onclick = teardown;
 
-// 切后台时把所有手指抬起（对应官方 releaseAllTouch）
-document.addEventListener('visibilitychange', () => {
-  if (document.hidden && touch) touch.releaseAllTouch();
-  if (touch && typeof touch.releaseAllTouch === 'function' && document.hidden) {
-    // TouchController 内部已广播 Up，这里无需额外处理
-  }
-});
+// 切后台时把所有手指抬起。TouchController.attach() 内部已监听 visibilitychange，
+// 这里不用重复处理。
 </script>
 </body>
 </html>
