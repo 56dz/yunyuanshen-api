@@ -65,22 +65,22 @@ x-rpc-device_os     Windows 10 | Android 13 | Device Software 7.1.0.346
 
 建立/校验米哈游通行证会话。**空 body**。
 
-响应（触摸端实测，含明文用户信息）：
+响应（触摸端实测，**下面所有值已替换为占位符**）：
 
 ```json
 {"retcode":0,"message":"OK","data":{
-  "user_info":{"aid":"291400719","mid":"0tmr5vsumg_mhy","account_name":"",
-    "email":"tc****6@163.com","is_email_verify":1,"area_code":"+86",
-    "mobile":"186******26","realname":"**洋","identity_code":"3****************2",
+  "user_info":{"aid":"<aid>","mid":"<mid>_mhy","account_name":"",
+    "email":"<masked>@example.com","is_email_verify":1,"area_code":"+86",
+    "mobile":"<masked>","realname":"<masked>","identity_code":"<masked>",
     "is_adult":1,"country":"",...},
-  "token":"<已脱敏>",
+  "token":"<redacted>",
   "realname_info":{"required":false,"action_type":"","action_ticket":""},
   "need_realperson":false}}
 ```
 
 - `aid` 就是后面 `cmd_line` 里的 `-aid`、以及 combo token 的 `oi`（open_id）。
 - 响应同时 `set-cookie`（`ltoken`/`ltuid`/`cookie_token` 等），**这是后续所有 cloudgame 接口的凭据**。
-- `token` 字段在导出抓包里被 bsk 自动脱敏为 `[redacted]`，实际值用于 cookie。
+- `token` 字段在导出抓包里被工具自动脱敏为 `[redacted]`，实际值用于 cookie。
 
 ---
 
@@ -102,15 +102,15 @@ Content-Type: application/json
 ```json
 {"retcode":0,"message":"OK","data":{
   "combo_id":"0",
-  "open_id":"291400719",
-  "combo_token":"v2_eb150f49274c7d4dc7bb2918f1ab57d26050d8f0",
+  "open_id":"<open_id>",
+  "combo_token":"v2_<hex>",
   "data":"{\"guest\":false,\"age_status\":2}",
   "heartbeat":false,
   "account_type":1,
   "fatigue_remind":{"nickname":"旅行者","reset_point":14400,"durations":[180,240,300]}}}
 ```
 
-- `combo_token` 以 `v2_` 开头。
+- `combo_token` 以 `v2_` 开头，长度约 47。
 - `fatigue_remind.durations` = `[180,240,300]` 秒，是防沉迷提醒节点。
 - 依赖 passport 域的 cookie，裸调返回非 0。
 
@@ -125,14 +125,24 @@ const header = `ai=${app_id};ci=${channel_id};oi=${open_id};ct=${combo_token};si
 签名原文（字典序 `app_id < channel_id < combo_token < open_id`）：
 
 ```
-app_id=4&channel_id=1&combo_token=v2_eb150f49274c7d4dc7bb2918f1ab57d26050d8f0&open_id=291400719
+app_id=4&channel_id=1&combo_token=v2_<hex>&open_id=<open_id>
 ```
 
-线上值：
+线上形态：
 
 ```
-ai=4;ci=1;oi=291400719;ct=v2_eb150f49274c7d4dc7bb2918f1ab57d26050d8f0;si=8193d687efd3892fe4da5978027bc55b613e41b3c47137b4999c2af942ce9b5d;bi=hk4e_cn
+ai=4;ci=1;oi=<open_id>;ct=v2_<hex>;si=<hmac>;bi=hk4e_cn
 ```
+
+六段顺序固定，`si` 只签前 4 个字段（不含 `bi`）。
+
+可复现的占位值示例（`open_id=100000001`、`combo_token=v2_0123456789abcdef0123456789abcdef01234567`）：
+
+```
+si = c3cfb041cd387fde2a35c075b8689d6cb8c0f33ef01cf11d95767ae7afc585c0
+```
+
+用错 key 会得到完全不同的 64 位 hex，这是排查时最快的判据 —— 详见 [pitfalls.md §2](./pitfalls.md#2-两个不同的-hmac-app_key)。
 
 可执行：`node src/sign.js` → `combo_token MATCH: true`。
 
@@ -262,7 +272,7 @@ POST /device-fp/api/getFp          body ~1.3KB → resp ~87B
 
 `platform` 取值：`22`=PC、`21`=iOS、`20`=Android、`24`=WebTouch。
 
-结果即 `x-rpc-device_fp`（实测 `38d81dacbb408` 这类短串）。
+结果即 `x-rpc-device_fp`（实测是 13 位十六进制短串）。
 
 ---
 

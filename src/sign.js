@@ -55,10 +55,19 @@ const body = Object.assign({}, signedBase, {
 });
 
 // ---- x-rpc-combo_token ----
-// 线上实测值（请求头 n165）:
-//   ai=4;ci=1;oi=291400719;ct=v2_eb15...;si=8193d687...;bi=hk4e_cn
-const TARGET_COMBO_TOKEN =
-  'ai=4;ci=1;oi=291400719;ct=v2_eb150f49274c7d4dc7bb2918f1ab57d26050d8f0;si=8193d687efd3892fe4da5978027bc55b613e41b3c47137b4999c2af942ce9b5d;bi=hk4e_cn';
+// 线上抓包已确认算法正确（si 与 header 内的值逐字一致），但真实的
+// open_id / combo_token / si 属于账号凭据，已从仓库移除。
+// 这里改用一组占位值做断言，期望值由 openssl 独立算出，用于保证"排序 + 拼接 + HMAC"没写错：
+//   $ printf 'app_id=4&channel_id=1&combo_token=v2_0123...&open_id=100000001' \
+//       | openssl dgst -sha256 -hmac 'd0d3a7342df2026a70f650b907800111'
+//   => c3cfb041cd387fde2a35c075b8689d6cb8c0f33ef01cf11d95767ae7afc585c0
+const FIXTURE = {
+  app_id: 4,
+  channel_id: 1,
+  open_id: '100000001',
+  combo_token: 'v2_0123456789abcdef0123456789abcdef01234567',
+};
+const TARGET_SI = 'c3cfb041cd387fde2a35c075b8689d6cb8c0f33ef01cf11d95767ae7afc585c0';
 
 function buildComboToken({ app_id = 4, channel_id = 1, open_id, combo_token, game_biz = 'hk4e_cn' }) {
   const c = { app_id, channel_id, open_id, combo_token };
@@ -72,33 +81,23 @@ function buildComboToken({ app_id = 4, channel_id = 1, open_id, combo_token, gam
 function selfCheck() {
   const okSign = body.sign === TARGET_SIGN;
 
-  const builtCombo = buildComboToken({
-    app_id: 4, channel_id: 1, open_id: '291400719',
-    combo_token: 'v2_eb150f49274c7d4dc7bb2918f1ab57d26050d8f0',
-  });
-  const okCombo = builtCombo === TARGET_COMBO_TOKEN;
+  const si = sign(FIXTURE, COMBO_APP_KEY);
+  const okCombo = si === TARGET_SI;
 
   console.log('[verify_sign] computed:', body.sign);
   console.log('[verify_sign] expected:', TARGET_SIGN);
   console.log('[verify_sign] MATCH   :', okSign);
-  console.log('[verify_sign] combo_token MATCH:', okCombo);
-  if (!okCombo) {
-    console.log('  built  :', builtCombo);
-    console.log('  expect :', TARGET_COMBO_TOKEN);
-  }
-  if (!okSign) {
-    console.log('! sign mismatch — 检查 APP_KEY 与 signedBase 字段集');
-  }
+  console.log('[verify_sign] combo si :', si);
+  console.log('[verify_sign] combo MATCH:', okCombo);
+  if (!okCombo) console.log('  expect :', TARGET_SI);
+  if (!okSign) console.log('! sign mismatch — 检查 APP_KEY 与 signedBase 字段集');
   return okSign && okCombo;
 }
 
 if (require.main === module) {
   selfCheck();
   console.log('\nfinal wire body:\n' + JSON.stringify(body));
-  console.log('\ncombo_token:\n' + buildComboToken({
-    app_id: 4, channel_id: 1, open_id: '291400719',
-    combo_token: 'v2_eb150f49274c7d4dc7bb2918f1ab57d26050d8f0',
-  }));
+  console.log('\ncombo_token (placeholder fixture):\n' + buildComboToken(FIXTURE));
 }
 
 module.exports = {

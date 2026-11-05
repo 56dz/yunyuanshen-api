@@ -255,7 +255,7 @@ POST /dispatcher/api/preDispatchVerify       {"biz_key":"hk4e_cn","node_id":".."
 
 ```
 -user_screen_dpi 480 -user_screen_width 2532 -user_screen_height 1170
--user_system_language zh-CN -device_info eyJkZXZpY2VOYW1l... -user_ip 163.125.229.253 -aid 291400719
+-user_system_language zh-CN -device_info eyJkZXZpY2VOYW1l... -user_ip <server-observed-ip> -aid <aid>
 ```
 
 解码工具：

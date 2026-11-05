@@ -54,7 +54,7 @@ if (!COOKIE) {
 
 // 设备 id 建议持久化，否则每次登录服务端都当新设备
 const DEVICE_ID = process.env.MHY_DEVICE_ID || randomUuid();
-const DEVICE_FP = process.env.MHY_DEVICE_FP || '38d81dacbb408';
+const DEVICE_FP = process.env.MHY_DEVICE_FP; // 留空则不带该 header，由服务端自行分配
 
 function randomUuid() {
   return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
