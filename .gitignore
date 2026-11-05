@@ -1,0 +1,11 @@
+node_modules/
+npm-debug.log*
+.DS_Store
+Thumbs.db
+
+# 抓包与逆向中间产物（体积大，且可能含个人信息）
+capture/
+js/
+mjs/
+*.b64
+_tmp/

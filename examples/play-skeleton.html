@@ -1,0 +1,450 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no,viewport-fit=cover">
+<title>云·原神 重封装骨架</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #000; overflow: hidden; }
+  #stage { position: relative; width: 100vw; height: 100vh; }
+  #video { width: 100%; height: 100%; object-fit: contain; display: block; }
+  #overlay { position: absolute; inset: 0; touch-action: none; }
+  #log { position: absolute; left: 8px; top: 8px; color: #0f0; font: 12px/1.4 monospace;
+         white-space: pre-wrap; max-width: 62vw; pointer-events: none;
+         text-shadow: 0 0 3px #000; }
+  #bar { position: absolute; right: 8px; top: 8px; display: flex; flex-direction: column; gap: 6px; }
+  #bar button { font: 12px monospace; padding: 6px 10px; }
+</style>
+</head>
+<body>
+<div id="stage">
+  <video id="video" autoplay playsinline></video>
+  <div id="overlay"></div>
+  <div id="log"></div>
+  <div id="bar">
+    <button id="btn-login">1 登录</button>
+    <button id="btn-dispatch">2 调度</button>
+    <button id="btn-connect">3 连接</button>
+    <button id="btn-quit">退出</button>
+  </div>
+</div>
+
+<!-- 触摸协议实现：普通 <script>，会挂到 window.YYS_TOUCH -->
+<script src="../src/touch.js"></script>
+<script>
+'use strict';
+/*
+ * 零构建骨架。三个步骤分别对应三步 HTTP 链 + WebRTC。
+ *
+ * 前置条件：
+ *   1. 用浏览器打开本页时，必须已登录 ys.mihoyo.com（同源 passport cookie）。
+ *      跨域会失败，所以要么把本页部署到 ys.mihoyo.com 同源（不可行），
+ *      要么在 Chrome 里启动时加 --disable-web-security --user-data-dir=<临时目录>
+ *      并在该实例登录一次米游社。生产环境请改成自己的后端代理。
+ *   2. 步骤 3 会真实建立游戏会话并**开始扣时长**，用完立刻点"退出"。
+ */
+
+const $ = (id) => document.getElementById(id);
+const logEl = $('log');
+const video = $('video');
+const overlay = $('overlay');
+const log = (...a) => {
+  logEl.textContent += a.map((x) => typeof x === 'string' ? x : JSON.stringify(x)).join(' ') + '\n';
+  logEl.scrollTop = logEl.scrollHeight;
+};
+const { TouchController } = window.YYS_TOUCH;
+
+// ───────────────────────── 常量 ─────────────────────────
+const GAME_BIZ = 'hk4e_cn';
+const CLOUD_BASE = 'https://api-cloudgame.mihoyo.com/hk4e_cg_cn';
+const APP_KEY = '7511caf05a67bb7ca33b1970ce6222a8';        // paasDispatch 的 sign
+const COMBO_APP_KEY = 'd0d3a7342df2026a70f650b907800111';  // combo_token 的 si
+const TOUCH = { comboClientType: 24, cloudClientType: 18, cps: 'touch_mihoyo',
+                sysVersion: 'Android 13', speedClientType: 8 };
+
+const state = { combo: '', aid: '', sdkParam: '', sid: '', resolution: '', w: 0, h: 0 };
+let pc = null, ws = null, dataChannel = null, keepAlive = null, touch = null;
+
+// ───────────────────────── HMAC-SHA256（Web Crypto）─────────────────────────
+async function hmacHex(keyStr, str) {
+  const enc = new TextEncoder();
+  const key = await crypto.subtle.importKey(
+    'raw', enc.encode(keyStr), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+  const sig = await crypto.subtle.sign('HMAC', key, enc.encode(str));
+  return [...new Uint8Array(sig)].map((b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+// 对应前端 (0,r.R)：Object.keys().sort() → "k=v&"... 去掉末尾 &
+async function signSorted(obj, key) {
+  const str = Object.keys(obj).sort().map((k) => `${k}=${obj[k]}&`).join('').slice(0, -1);
+  return hmacHex(key, str);
+}
+
+// ───────────────────────── 极简 protobuf 解码（仅 wire format）─────────────────────────
+function readVarint(b, i) {
+  let v = 0, shift = 0;
+  for (;;) {
+    const x = b[i++];
+    v += (x & 0x7f) * 2 ** shift;
+    if (!(x & 0x80)) break;
+    shift += 7;
+    if (shift > 63) throw new RangeError('varint too long');
+  }
+  return [v, i];
+}
+function pbDecode(buf) {
+  const out = []; let i = 0;
+  while (i < buf.length) {
+    let key; [key, i] = readVarint(buf, i);
+    const field = key >>> 3, wire = key & 7;
+    if (wire === 0) { let v; [v, i] = readVarint(buf, i); out.push({ field, value: v }); }
+    else if (wire === 1) { out.push({ field, value: buf.slice(i, i + 8) }); i += 8; }
+    else if (wire === 5) { out.push({ field, value: buf.slice(i, i + 4) }); i += 4; }
+    else if (wire === 2) {
+      let len; [len, i] = readVarint(buf, i);
+      const sub = buf.slice(i, i + len); i += len;
+      const s = new TextDecoder().decode(sub);
+      out.push({ field, value: /^[\t\n\r\x20-\x7e]*$/.test(s) && s ? s : sub });
+    } else throw new RangeError('wire ' + wire);
+  }
+  return out;
+}
+
+// ───────────────────────── 1. 登录 ─────────────────────────
+async function doLogin() {
+  log('▸ webVerifyForGame');
+  const v = await fetch('https://passport-api.mihoyo.com/account/ma-cn-session/web/webVerifyForGame', {
+    method: 'POST', credentials: 'include',
+    headers: {
+      'x-rpc-app_id': 'c76ync6mutq8',
+      'x-rpc-sdk_version': '2.50.1',
+      'x-rpc-client_type': String(TOUCH.comboClientType),
+      'x-rpc-lifecycle_id': [...crypto.getRandomValues(new Uint8Array(5))]
+        .map((b) => b.toString(16).padStart(2, '0')).join(''),
+      'x-rpc-mi_referrer': location.href,
+    },
+  }).then((r) => r.json());
+  if (v.retcode !== 0) throw new Error('webVerifyForGame: ' + JSON.stringify(v));
+  state.aid = v.data.user_info.aid;
+  log('  aid =', state.aid);
+
+  log('▸ webLogin');
+  const l = await fetch(`https://hk4e-sdk.mihoyo.com/${GAME_BIZ}/combo/granter/login/webLogin`, {
+    method: 'POST', credentials: 'include',
+    headers: {
+      'content-type': 'application/json',
+      'x-rpc-client_type': String(TOUCH.comboClientType),
+      'x-rpc-game_biz': GAME_BIZ,
+      'x-rpc-channel_id': '1',
+      'x-rpc-mdk_version': '2.57.0',
+    },
+    body: JSON.stringify({ app_id: 4, channel_id: 1 }),
+  }).then((r) => r.json());
+  if (l.retcode !== 0) throw new Error('webLogin: ' + JSON.stringify(l));
+  log('  open_id =', l.data.open_id);
+
+  // x-rpc-combo_token = ai;ci;oi;ct;si;bi —— si 用 COMBO_APP_KEY
+  const si = await signSorted({
+    app_id: 4, channel_id: 1, open_id: l.data.open_id, combo_token: l.data.combo_token,
+  }, COMBO_APP_KEY);
+  state.combo = `ai=4;ci=1;oi=${l.data.open_id};ct=${l.data.combo_token};si=${si};bi=${GAME_BIZ}`;
+  log('  x-rpc-combo_token ok');
+}
+
+function cloudHeaders() {
+  return {
+    'x-rpc-app_id': '4',
+    'x-rpc-app_version': '7.2.0',
+    'x-rpc-client_type': String(TOUCH.cloudClientType),
+    'x-rpc-cg_game_biz': GAME_BIZ,
+    'x-rpc-op_biz': 'clgm_cn',
+    'x-rpc-channel': 'mihoyo',
+    'x-rpc-cps': TOUCH.cps,
+    'x-rpc-language': 'zh-cn',
+    'x-rpc-sys_version': TOUCH.sysVersion,
+    'x-rpc-device_id': localStorage.getItem('mhy_did') || (() => {
+      const id = crypto.randomUUID(); localStorage.setItem('mhy_did', id); return id;
+    })(),
+    'x-rpc-device_name': 'Unknown',
+    'x-rpc-device_model': 'Unknown',
+    'x-rpc-vendor_id': '2',
+    'x-rpc-combo_token': state.combo,
+  };
+}
+const postJSON = (path, body) => fetch(CLOUD_BASE + path, {
+  method: 'POST', credentials: 'include',
+  headers: { ...cloudHeaders(), 'content-type': 'application/json' },
+  body: JSON.stringify(body),
+}).then((r) => r.json());
+
+// ───────────────────────── 2. 调度 ─────────────────────────
+function testRtt(url, timeout = 1000) {
+  return new Promise((resolve) => {
+    let ws;
+    try { ws = new WebSocket(url); } catch { return resolve(-1); }
+    const sent = []; let n = 0, sum = 0;
+    const timer = setTimeout(() => { try { ws.close(); } catch {} resolve(-1); }, timeout);
+    ws.onopen = () => { for (let i = 0; i < 20; i++) { sent.push(Date.now()); ws.send('X'); } };
+    ws.onmessage = () => {
+      const t = sent.shift(); if (t === undefined) return;
+      sum += Date.now() - t; n++;
+      if (n >= 20) { clearTimeout(timer); try { ws.close(); } catch {} resolve(Math.round(sum / n)); }
+    };
+    ws.onerror = () => { clearTimeout(timer); resolve(-1); };
+  });
+}
+
+async function doDispatch() {
+  log('▸ gamer/login');
+  const gl = await postJSON('/gamer/api/login', {});
+  if (gl.retcode !== 0) throw new Error('gamer/login: ' + JSON.stringify(gl));
+
+  log('▸ getSpeedLimitConfig');
+  const speed = await fetch(
+    `${CLOUD_BASE}/gamer/api/getSpeedLimitConfig?speed_client_type=${TOUCH.speedClientType}`,
+    { headers: cloudHeaders(), credentials: 'include' }).then((r) => r.json());
+  const gear = speed.data.list[speed.data.default_gear];
+  const bitRate = 1024 * gear.top;
+  log('  gear =', gear.name, 'top =', gear.top, '→ bit_rate =', bitRate);
+
+  log('▸ statusCheck');
+  const st = await postJSON('/dispatcher/api/statusCheck', { biz_key: GAME_BIZ });
+  if (st.retcode !== 0) throw new Error('statusCheck: ' + JSON.stringify(st));
+
+  log('▸ listPingServer');
+  const ping = await postJSON('/dispatcher/api/listPingServer', {
+    biz_key: GAME_BIZ,
+    ext_data: JSON.stringify({ platform: TOUCH.cloudClientType }),  // 注意：JSON 字符串
+  });
+
+  log('  RTT 测速中（每个 20 包）...');
+  const results = [];
+  for (const s of ping.data.ping_svr) {
+    const rtt = await testRtt(s.wss_url);
+    log(`    ${String(s.display_name).padEnd(14)} ${rtt}ms`);
+    results.push({
+      ping_server_id: s.ping_server_id, node_id: s.node_id,
+      display_name: s.display_name, region_id: s.region_id,
+      province_id: String(s.province_id), isp_type: s.isp_type,
+      rtt: rtt < 0 ? 0 : rtt, loss_rate: 0, jitter: 0, out_of_order: 0,
+    });
+  }
+
+  log('▸ getNodesInfo');
+  const nodes = await postJSON('/dispatcher/api/getNodesInfo', {
+    biz_key: GAME_BIZ,
+    node: JSON.stringify({ bandwidth: 0, ping_results: results }),  // 注意：JSON 字符串
+    speed_client_type: TOUCH.speedClientType,
+  });
+  const node = nodes.data.nodes[0];
+  log('  node_id =', node.node_id, ' regions =', node.region_ids.length);
+
+  const dpr = window.devicePixelRatio || 1;
+  const w = Math.round(innerWidth * dpr);
+  const h = Math.round(innerHeight * dpr);
+  state.w = w; state.h = h; state.resolution = `${w}x${h}`;
+
+  const userData = JSON.stringify({
+    dpi: Math.round(96 * dpr), w, h, lang: 'zh-CN',
+    di: btoa(JSON.stringify({
+      deviceName: 'Unknown',
+      systemVersion: TOUCH.sysVersion,
+      deviceInfo: `operatingSystem:${TOUCH.sysVersion}&deviceModel:Unknown&processorCount:8&processorType:Unknown&systemMemorySize:16&graphicsDeviceName:Unknown`,
+    })),
+  });
+
+  // ⚠ 关键：签名对象里的 regions 是 JSON 字符串，外面才是数组
+  const signedBase = {
+    bit_rate: bitRate, biz_key: GAME_BIZ, cmd_line: '', user_data: userData,
+    codec_type: 1, env: '2', ext_data: '', fps: 60,
+    node_id: node.node_id, resolution: state.resolution,
+    regions: JSON.stringify(node.region_ids),
+  };
+  const sign = await signSorted(signedBase, APP_KEY);
+  const body = {
+    ...signedBase,
+    hint: null, net_state: 4, queue_type: '', sign,
+    using_new_cmd_line: true, queue_switch: false,
+    regions: node.region_ids,
+  };
+
+  log('▸ paasDispatch');
+  const d = await postJSON('/dispatcher/api/paasDispatch', body);
+  if (d.retcode !== 0) throw new Error('paasDispatch: ' + JSON.stringify(d));
+  log('  result_code =', d.data.result_code);
+  if (d.data.result_code !== 'FINISHED') {
+    log('  非 FINISHED（排队中？）', d.data.queue_info);
+    return;
+  }
+  state.sdkParam = d.data.finish_result.sdk_param;
+  state.sid = d.data.finish_result.sid;
+  log('  sid =', state.sid, ' provider =', d.data.finish_result.cloud_provider);
+}
+
+// ───────────────────────── 3. 连接 ─────────────────────────
+function parseSdkParam(b64) {
+  const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+  const fields = pbDecode(bytes);
+  const get = (n) => fields.filter((f) => f.field === n).map((f) => f.value);
+  return {
+    sid: get(1)[0], podId: get(3)[0], gameToken: get(4)[0],
+    gameSvrAddr: get(8)[0], rtcUdpPort: get(9)[0],
+    wssUrl: get(11)[0],
+    controlUrls: [...get(14), ...get(15)],
+  };
+}
+
+function frame(type, payload) {
+  const text = typeof payload === 'string' ? payload : '';
+  const data = new TextEncoder().encode(text);
+  const buf = new Uint8Array(8 + data.length);
+  const dv = new DataView(buf.buffer);
+  dv.setUint32(0, type);
+  dv.setUint32(4, data.length);
+  buf.set(data, 8);
+  return buf;
+}
+function unframe(raw) {
+  const buf = raw instanceof ArrayBuffer ? new Uint8Array(raw) : raw;
+  const dv = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
+  const type = dv.getUint32(0, false);
+  const len = dv.getUint32(4, false);
+  return [type, new TextDecoder().decode(buf.slice(8, 8 + len))];
+}
+
+function gameRect() {
+  // video 是 object-fit: contain，实际画面区域要按视频宽高比反算
+  const r = video.getBoundingClientRect();
+  const vw = video.videoWidth || r.width;
+  const vh = video.videoHeight || r.height;
+  const scale = Math.min(r.width / vw, r.height / vh);
+  const dw = vw * scale, dh = vh * scale;
+  return { x: r.x + (r.width - dw) / 2, y: r.y + (r.height - dh) / 2, width: dw, height: dh };
+}
+
+async function doConnect() {
+  const p = parseSdkParam(state.sdkParam);
+  const url = p.wssUrl.endsWith('/rtc-sdk') ? p.wssUrl : p.wssUrl + '/rtc-sdk';
+  log('▸ wss =', url);
+  log('  game_token =', p.gameToken, ' udp =', p.rtcUdpPort);
+
+  pc = new RTCPeerConnection({});   // 无 STUN / TURN
+  pc.ondatachannel = (e) => {
+    dataChannel = e.channel;
+    dataChannel.binaryType = 'arraybuffer';
+    log('[rtc] datachannel:', dataChannel.label);
+  };
+  pc.ontrack = (e) => {
+    if (e.track.kind === 'video') { video.srcObject = e.streams[0]; log('[rtc] video on'); }
+    else log('[rtc] audio on');
+  };
+  pc.onconnectionstatechange = () => log('[rtc] state =', pc.connectionState);
+
+  ws = new WebSocket(url);
+  ws.binaryType = 'arraybuffer';
+
+  ws.onopen = () => {
+    log('[ws] open');
+    ws.send(frame(3, JSON.stringify({ client_type: 'web', type: 'client hello' })));
+    // 心跳：10s 一次**裸空帧**（没有 8 字节头）
+    keepAlive = setInterval(() => { if (ws.readyState === 1) ws.send(''); }, 10000);
+  };
+
+  ws.onmessage = async (ev) => {
+    let type, text;
+    try { [type, text] = unframe(ev.data); } catch { return; }
+    if (type === 2) return;                       // 二进制 proxy
+    if (type === 3) { log('[ws] handshake:', text.slice(0, 80)); return; }
+    if (type !== 1) return;
+
+    let msg;
+    try { msg = JSON.parse(text); } catch { return; }
+
+    if (msg.type === 'offer') {
+      log('[ws] offer received');
+      await pc.setRemoteDescription({ type: 'offer', sdp: msg.sdp });
+      const answer = await pc.createAnswer();
+      await pc.setLocalDescription(answer);
+      ws.send(frame(1, JSON.stringify({ type: 'answer', sdp: pc.localDescription.sdp })));
+      log('[ws] answer sent');
+    } else if (msg.type === 'candidates' && msg.candidate) {
+      // 服务端 candidate 的 ip:port 必须替换成 sdk_param 的 game_svr_addr / rtcUdpPort
+      const [ip] = p.gameSvrAddr.split(':');
+      const cand = msg.candidate.replace(/(\S+) (\d+)( \S+ \d+)?$/, `${ip} ${p.rtcUdpPort}$3`);
+      try {
+        await pc.addIceCandidate({
+          candidate: cand,
+          sdpMid: msg['sdp-mid'],
+          sdpMLineIndex: msg['sdp-mline-index'],
+        });
+      } catch (e) { /* 单个 candidate 失败不影响整体 */ }
+    }
+  };
+
+  pc.onicecandidate = (e) => {
+    if (!e.candidate || ws.readyState !== 1) return;
+    ws.send(frame(1, JSON.stringify({
+      candidate: e.candidate.candidate,
+      'sdp-mid': e.candidate.sdpMid,
+      'sdp-mline-index': e.candidate.sdpMLineIndex,
+      type: 'candidates',
+    })));
+  };
+
+  // 等 DataChannel（服务端建立，客户端只接收）
+  await new Promise((r) => {
+    const t = setInterval(() => { if (dataChannel) { clearInterval(t); r(); } }, 200);
+    setTimeout(() => { clearInterval(t); r(); }, 20000);
+  });
+
+  if (!dataChannel) { log('! 20s 内未收到 DataChannel'); return; }
+  setupTouch();
+}
+
+function setupTouch() {
+  const send = (packet) => {
+    if (!dataChannel || dataChannel.readyState !== 'open') return false;
+    dataChannel.send(packet.buffer ? packet.buffer : packet);
+    return true;
+  };
+  touch = new TouchController(send, gameRect);
+  touch.attach(overlay);
+  log('✓ 触摸已挂载，点屏幕试试');
+}
+
+function teardown() {
+  clearInterval(keepAlive);
+  try { ws && ws.close(); } catch {}
+  try { pc && pc.close(); } catch {}
+  video.srcObject = null;
+  ws = pc = dataChannel = touch = null;
+  log('已断开');
+}
+
+// ───────────────────────── 按钮 ─────────────────────────
+$('btn-login').onclick = async () => {
+  try { await doLogin(); log('✓ 登录完成'); }
+  catch (e) { log('✗ ' + e.message); }
+};
+$('btn-dispatch').onclick = async () => {
+  if (!state.combo) return log('! 先点 1 登录');
+  try { await doDispatch(); log('✓ 调度完成'); }
+  catch (e) { log('✗ ' + e.message); }
+};
+$('btn-connect').onclick = async () => {
+  if (!state.sdkParam) return log('! 先点 2 调度');
+  try { await doConnect(); }
+  catch (e) { log('✗ ' + e.message); }
+};
+$('btn-quit').onclick = teardown;
+
+// 切后台时把所有手指抬起（对应官方 releaseAllTouch）
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden && touch) touch.releaseAllTouch();
+  if (touch && typeof touch.releaseAllTouch === 'function' && document.hidden) {
+    // TouchController 内部已广播 Up，这里无需额外处理
+  }
+});
+</script>
+</body>
+</html>

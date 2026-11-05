@@ -1,0 +1,32 @@
+{
+  "name": "yunyuanshen-api",
+  "version": "0.1.0",
+  "description": "云·原神 Web 客户端（ys.mihoyo.com）接口与输入协议逆向结果 + 可运行参考实现",
+  "license": "GPL-3.0",
+  "private": true,
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "test": "node src/sign.js && node src/test-touch.js",
+    "sign": "node src/sign.js",
+    "touch": "node src/test-touch.js",
+    "login": "node examples/login.js",
+    "dispatch": "node examples/dispatch.js"
+  },
+  "keywords": [
+    "genshin",
+    "cloud-game",
+    "webcodecs",
+    "webrtc",
+    "reverse-engineering",
+    "protobuf"
+  ],
+  "files": [
+    "src",
+    "docs",
+    "examples",
+    "README.md",
+    "LICENSE"
+  ]
+}
